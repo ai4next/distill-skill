@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """蒸馏.skill · 素材归集与清点
 
-把散落的素材按类型归入 distilled/<slug>/sources/，统计字数与哈希，
-生成 / 增量更新 manifest.json（蒸馏档案契约的素材清单）。
+把散落的素材按类型归入 `distilled/<slug>/sources/`，统计字数与哈希，
+生成 / 增量更新 `manifest.json`（蒸馏档案契约的素材清单）。
 
 用法:
     python3 ingest.py <素材路径...> --out distilled/<slug>/ [选项]
@@ -23,77 +23,29 @@
     - 二进制素材（PDF/EPUB 等）无法用标准库抽文本，words 记 null 并在末尾提示，
       由 agent 在 Phase 1 用 pdf/文档读取工具提取后回填。
     - 已存在 manifest.json 时走增量：sha256 相同的素材跳过，不重复计入。
+    - **脚本不做语义判定**：`coverage` / `sources_primary` / `sources_secondary` /
+      `dimensions[].sources` 无法机械得出，一律写 **null（未回填）**，
+      由 agent 在 Phase 3 判定后回填。**null ≠ 0**：0 是判定结果，null 是没判。
+      （SKILL.md 反模式 #16：让脚本做语义判定。）
+    - 本脚本**不**计算 `distillate_sha256`——那是 `seal.py` 的职责（档案定型后才封存）。
 """
 
 import argparse
-import hashlib
-import json
 import os
 import re
 import shutil
 import sys
 from datetime import date
 
-SCHEMA_VERSION = 1
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _lib  # noqa: E402
 
-# 维度定义：与 references/schema-*.md 保持一致
-SCHEMA_DIMENSIONS = {
-    "person": [
-        ("01", "著作", "01-writings.md"),
-        ("02", "对话", "02-conversations.md"),
-        ("03", "表达", "03-expression-dna.md"),
-        ("04", "他者", "04-external-views.md"),
-        ("05", "决策", "05-decisions.md"),
-        ("06", "时间线", "06-timeline.md"),
-    ],
-    "topic": [
-        ("01", "领域共识", "01-consensus.md"),
-        ("02", "流派分歧", "02-schools.md"),
-        ("03", "关键概念", "03-concepts.md"),
-        ("04", "经典案例", "04-cases.md"),
-        ("05", "争议前沿", "05-frontier.md"),
-        ("06", "演进脉络", "06-evolution.md"),
-    ],
-    "document": [
-        ("01", "论点树", "01-argument-tree.md"),
-        ("02", "证据链", "02-evidence-chain.md"),
-        ("03", "术语表", "03-glossary.md"),
-        ("04", "隐含假设", "04-assumptions.md"),
-        ("05", "内部矛盾", "05-contradictions.md"),
-        ("06", "信息缺口", "06-gaps.md"),
-    ],
-}
+SCHEMA_VERSION = _lib.SUPPORTED_SCHEMA_VERSION
+SCHEMA_DIMENSIONS = _lib.SCHEMA_DIMENSIONS
+TYPE_BY_EXT = _lib.TYPE_BY_EXT
+BINARY_EXTS = _lib.BINARY_EXTS
 
-# 扩展名 → 素材类型（类型名 == sources/ 子目录名）
-TYPE_BY_EXT = {
-    "books": {".pdf", ".epub", ".mobi", ".azw3", ".djvu"},
-    "transcripts": {".srt", ".vtt"},
-    "articles": {".html", ".htm", ".mhtml", ".mht"},
-    "notes": {".txt", ".md", ".markdown", ".rst", ".org", ".docx", ".doc"},
-    "chat": {".jsonl", ".json"},
-    "code": {
-        ".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".java", ".kt", ".rs",
-        ".c", ".h", ".cpp", ".hpp", ".cs", ".rb", ".php", ".swift", ".scala",
-        ".sh", ".bash", ".zsh", ".sql", ".yaml", ".yml", ".toml", ".ini",
-    },
-    "video": {".mp4", ".mkv", ".mov", ".webm", ".avi", ".mp3", ".m4a", ".wav", ".flac"},
-}
-
-# 已知二进制：不做文本解码，words 记 null
-BINARY_EXTS = {
-    ".pdf", ".epub", ".mobi", ".azw3", ".djvu", ".docx", ".doc",
-    ".mp4", ".mkv", ".mov", ".webm", ".avi", ".mp3", ".m4a", ".wav", ".flac",
-}
-
-CJK_RE = re.compile(r"[一-鿿぀-ヿ가-힯]")
-LATIN_RE = re.compile(r"[A-Za-z0-9]+")
-
-
-def usage_error(msg):
-    print("❌ " + msg)
-    print("用法: python3 ingest.py <素材路径...> --out distilled/<slug>/ [--schema person]")
-    print("     详细说明见文件头部 docstring")
-    sys.exit(1)
+USAGE = "python3 ingest.py <素材路径...> --out distilled/<slug>/ [--schema person]"
 
 
 def classify(path):
@@ -105,33 +57,18 @@ def classify(path):
     return "other"
 
 
-def sha256_of(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 16), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def read_text(path):
     """尽力解码为文本；二进制或解码失败返回 None。"""
     if os.path.splitext(path)[1].lower() in BINARY_EXTS:
         return None
     with open(path, "rb") as f:
         raw = f.read()
-    for enc in ("utf-8", "gb18030", "utf-16"):
+    for enc in ("utf-8-sig", "utf-8", "gb18030", "utf-16"):
         try:
             return raw.decode(enc)
         except (UnicodeDecodeError, UnicodeError):
             continue
     return None
-
-
-def count_words(text):
-    """CJK 按字计，拉丁按词计。"""
-    if text is None:
-        return None
-    return len(CJK_RE.findall(text)) + len(LATIN_RE.findall(text))
 
 
 def iter_files(paths):
@@ -152,67 +89,102 @@ def iter_files(paths):
             print("⚠️  路径不存在，跳过: " + p)
 
 
-def load_manifest(out_dir):
-    mpath = os.path.join(out_dir, "manifest.json")
-    if not os.path.isfile(mpath):
-        return None
-    try:
-        with open(mpath, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (ValueError, OSError) as e:
-        print("⚠️  现有 manifest.json 无法解析（%s），将重建" % e)
-        return None
+def next_source_id(sources):
+    """下一个素材编号。取现有最大编号 +1，避免删过素材后编号撞车。"""
+    mx = 0
+    for s in sources:
+        m = re.match(r"S(\d+)$", str(s.get("id", "")))
+        if m:
+            mx = max(mx, int(m.group(1)))
+    return mx + 1
+
+
+def migrate_unfilled_dim(prev):
+    """把旧版 ingest 写的「默认 0」迁移为「未回填 null」。
+
+    旧版把脚本无法判定的字段一律写 0，于是「未回填」与「判定为 0」无法区分。
+    只在**无歧义**时迁移：coverage 为 0 **且** sources 为 0/null **且** confidence
+    为空/全 0 —— 不存在一个 agent 在判定 coverage=0 的同时把来源数与信度全留空。
+    迁移后 quality_check 会提示回填；误迁移的代价只是多一次提示，不会丢真数据。
+    """
+    if prev.get("coverage") != 0:
+        return prev
+    conf = prev.get("confidence")
+    conf_empty = (not isinstance(conf, dict)) or not _lib.conf_total(conf)
+    if prev.get("sources") in (0, None) and conf_empty:
+        prev = dict(prev)
+        prev["coverage"] = None
+        prev["sources"] = None
+        prev["confidence"] = None
+    return prev
+
+
+def migrate_unfilled_counts(manifest):
+    """同理迁移 manifest 顶层的「一手/二手」默认 0。
+
+    两者同时为 0 且有素材 → 是旧版默认值（未判定）。若真是一手为 0，
+    二手必然 >0，不会被误迁移。
+    """
+    if manifest.get("sources_primary") == 0 and manifest.get("sources_secondary") == 0 \
+            and manifest.get("sources"):
+        manifest["sources_primary"] = None
+        manifest["sources_secondary"] = None
+    return manifest
 
 
 def main():
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("paths", nargs="*", help="素材文件或目录")
     ap.add_argument("--out", required=False, help="档案目录，如 distilled/munger/")
-    ap.add_argument("--schema", default="person",
-                    choices=["person", "topic", "document", "custom"])
+    ap.add_argument("--schema", default="person", choices=list(_lib.SCHEMAS))
     ap.add_argument("--slug", default=None)
     ap.add_argument("--title", default=None)
     ap.add_argument("--dimensions", default=None, help="custom schema 的维度，逗号分隔")
     args = ap.parse_args()
 
     if not args.paths:
-        usage_error("缺少素材路径")
+        _lib.usage_error("缺少素材路径", USAGE)
     if not args.out:
-        usage_error("缺少 --out 档案目录")
+        _lib.usage_error("缺少 --out 档案目录", USAGE)
 
     out_dir = os.path.abspath(os.path.expanduser(args.out))
     slug = args.slug or os.path.basename(out_dir.rstrip(os.sep))
     if not slug:
-        usage_error("无法推断 slug，请显式传 --slug")
+        _lib.usage_error("无法推断 slug，请显式传 --slug", USAGE)
 
     # 维度定义
     if args.schema == "custom":
         if not args.dimensions:
-            usage_error("schema=custom 时必须用 --dimensions 指定维度（逗号分隔）")
+            _lib.usage_error("schema=custom 时必须用 --dimensions 指定维度（逗号分隔）", USAGE)
         names = [s.strip() for s in args.dimensions.split(",") if s.strip()]
         if not 2 <= len(names) <= 8:
-            usage_error("custom 维度数量需在 2-8 之间，当前 %d 个" % len(names))
-        dims = [("%02d" % (i + 1), n, "%02d-%s.md" % (i + 1, re.sub(r"\W+", "-", n).strip("-").lower() or "dim"))
+            _lib.usage_error("custom 维度数量需在 2-8 之间，当前 %d 个" % len(names), USAGE)
+        dims = [("%02d" % (i + 1), n,
+                 "%02d-%s.md" % (i + 1, re.sub(r"\W+", "-", n).strip("-").lower() or "dim"))
                 for i, n in enumerate(names)]
     else:
         dims = SCHEMA_DIMENSIONS[args.schema]
 
     for sub in ("", "research", "sources"):
         os.makedirs(os.path.join(out_dir, sub), exist_ok=True)
-    for t in list(TYPE_BY_EXT.keys()) + ["other"]:
+    for t in _lib.SOURCES_SUBDIRS:
         os.makedirs(os.path.join(out_dir, "sources", t), exist_ok=True)
 
-    old = load_manifest(out_dir)
-    old_sources = {s.get("sha256"): s for s in (old or {}).get("sources", []) if s.get("sha256")}
-    sources = list((old or {}).get("sources", []))
-    next_id = len(sources) + 1
+    old = _lib.load_json(os.path.join(out_dir, "manifest.json"))
+    if old is not None and not isinstance(old, dict):
+        print("⚠️  现有 manifest.json 结构异常，将重建")
+        old = None
+    old = old or {}
+    old_sources = {s.get("sha256"): s for s in old.get("sources", []) if s.get("sha256")}
+    sources = list(old.get("sources", []))
+    sid = next_source_id(sources)
 
     added, skipped, need_text = [], [], []
     today = date.today().isoformat()
 
     for path in iter_files(args.paths):
         try:
-            digest = sha256_of(path)
+            digest = _lib.sha256_file(path)
         except OSError as e:
             print("⚠️  读取失败，跳过: %s (%s)" % (path, e))
             continue
@@ -237,13 +209,14 @@ def main():
                 print("⚠️  复制失败，跳过: %s (%s)" % (path, e))
                 continue
 
-        words = count_words(read_text(dest))
+        text = read_text(dest)
+        words = None if text is None else _lib.count_words(text)
         if words is None:
             need_text.append(os.path.relpath(dest, out_dir))
 
         rel = os.path.relpath(dest, out_dir)
         sources.append({
-            "id": "S%03d" % next_id,
+            "id": "S%03d" % sid,
             "path": rel,
             "origin": "local",
             "type": type_name,
@@ -255,31 +228,28 @@ def main():
             "dimensions": [],
         })
         added.append((rel, type_name, words))
-        next_id += 1
+        sid += 1
 
     # 维度状态：research/ 下有对应文件即 partial/complete
-    old_dims = {d.get("name"): d for d in (old or {}).get("dimensions", [])}
+    old_dims = {d.get("name"): d for d in old.get("dimensions", [])}
     dimensions = []
     for did, name, fname in dims:
         fpath = os.path.join(out_dir, "research", fname)
         if os.path.isfile(fpath):
-            try:
-                with open(fpath, "r", encoding="utf-8") as f:
-                    body = f.read()
-            except OSError:
-                body = ""
+            body = _lib.read_text(fpath)
             status = "complete" if len(body) > 800 else "partial"
         else:
             status = "missing"
-        prev = old_dims.get(name, {})
+        prev = migrate_unfilled_dim(old_dims.get(name, {}))
         dimensions.append({
             "id": did,
             "name": name,
             "file": "research/" + fname,
             "status": status,
-            "sources": prev.get("sources", 0),
-            "confidence": prev.get("confidence", {"A": 0, "B": 0, "C": 0, "D": 0}),
-            "coverage": prev.get("coverage", 0),
+            # 以下三项脚本无法判定 → 未回填写 null（**null ≠ 0**），由 agent 在 Phase 3 回填
+            "sources": prev.get("sources"),
+            "confidence": prev.get("confidence"),
+            "coverage": prev.get("coverage"),
         })
 
     total_words = sum(s["words"] or 0 for s in sources)
@@ -287,34 +257,36 @@ def main():
         "schema_version": SCHEMA_VERSION,
         "slug": slug,
         "schema": args.schema,
-        "title": args.title or (old or {}).get("title") or slug,
-        "created": (old or {}).get("created", today),
+        "title": args.title or old.get("title") or slug,
+        "created": old.get("created", today),
         "updated": today,
-        "version": ((old or {}).get("version", 0) + (1 if added else 0)) or 1,
+        "version": (old.get("version", 0) + (1 if added else 0)) or 1,
         "sources": sources,
         "source_words": total_words,
-        # 一手/二手需判断，脚本无法自动判定，默认 0，由 agent 在 Phase 3 回填
-        "sources_primary": (old or {}).get("sources_primary", 0),
-        "sources_secondary": (old or {}).get("sources_secondary", 0),
+        "sources_primary": old.get("sources_primary"),
+        "sources_secondary": old.get("sources_secondary"),
         "dimensions": dimensions,
-        "gaps": (old or {}).get("gaps", []),
-        "changes": (old or {}).get("changes", []) + ([{
+        "gaps": old.get("gaps", []),
+        # 综合档案专用字段：普通档案为 null / []
+        "meta_sources": old.get("meta_sources"),
+        "source_overlap": old.get("source_overlap", []),
+        "changes": old.get("changes", []) + ([{
             "date": today,
             "action": "ingest",
             "note": "新增素材 %d 个，跳过重复 %d 个" % (len(added), len(skipped)),
             "sources_added": len(added),
         }] if added else []),
-        "distillate_sha256": (old or {}).get("distillate_sha256"),
+        "distillate_sha256": old.get("distillate_sha256"),
     }
+    migrate_unfilled_counts(manifest)
     if not manifest["changes"]:
         manifest["changes"] = [{
-            "date": today, "action": "initial", "note": "首次建库", "sources_added": len(added),
+            "date": today, "action": "initial", "note": "首次建库",
+            "sources_added": len(added),
         }]
 
     mpath = os.path.join(out_dir, "manifest.json")
-    with open(mpath, "w", encoding="utf-8") as f:
-        json.dump(manifest, f, ensure_ascii=False, indent=2)
-        f.write("\n")
+    _lib.write_json(mpath, manifest)
 
     # 报告
     print("素材归集: %s" % out_dir)
@@ -336,7 +308,8 @@ def main():
 
     if need_text:
         print("")
-        print("  ⚠️  以下 %d 个二进制素材未能统计字数，请在 Phase 1 用文档读取工具抽取后回填:" % len(need_text))
+        print("  ⚠️  以下 %d 个二进制素材未能统计字数，请在 Phase 1 用文档读取工具抽取后回填:"
+              % len(need_text))
         for p in need_text[:10]:
             print("     - " + p)
         if len(need_text) > 10:
@@ -345,6 +318,10 @@ def main():
     if len(sources) < 10:
         print("")
         print("  ⚠️  素材不足 10 条，档案质量会受限（见 distillation-framework.md §九）")
+
+    print("")
+    print("  提示：coverage / 一手二手计数脚本不判定，写为 null（未回填），Phase 3 由 agent 回填；")
+    print("        档案正文写完后跑 seal.py 封存 distillate_sha256。")
 
 
 if __name__ == "__main__":

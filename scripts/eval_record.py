@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """蒸馏.skill · 评测记录与对比
 
-维护 EVALS.jsonl（追加式评测历史），并提供**拒绝过度断言**的版本对比。
+维护 `EVALS.jsonl`（追加式评测历史），并提供**拒绝过度断言**的版本对比。
 
 背景:
     QUALITY.md 每次重跑评分都被覆盖，分数历史随之销毁。EVALS.jsonl 只增不改，
@@ -11,14 +11,21 @@
 用法:
     python3 eval_record.py record  --file distilled/<slug>/EVALS.jsonl --json '<记录 JSON>'
     python3 eval_record.py record  --file <path> --from-file <json文件>
+    python3 eval_record.py record  --file <path> --json '<记录 JSON>' --artifact distilled/<slug>
     python3 eval_record.py history --file <path>
     python3 eval_record.py compare --file <path> [--noise 10]
+
+选项:
+    --artifact PATH   指定被评测的档案（目录或 DISTILLATE.md）。
+                      **强烈建议使用**：它自动填入 artifact_sha256 与 version，
+                      消除手抄哈希/版本号出错的可能。与记录里已有的值冲突时会告警。
 
 对比的有效性检查（关键）:
     compare **拒绝**在下列情况下给出趋势结论，只如实说明原因：
       1. 题目集变了（含题目退役）—— 缺口被补上后题目失效，直接比会得出「越完整分越低」的假退步
       2. 评分 agent < 2 个 —— 单次 LLM 评分噪声 ±5-10 分，不足以支撑趋势
       3. 分数差落在噪声带内 —— 分不出是真变化还是抖动
+      4. 两次评的是同一份档案（artifact_sha256 相同）—— 没有变化可比
 
 只读不写（record 除外，它只追加）。
 """
@@ -26,50 +33,13 @@
 import json
 import os
 import sys
-import unicodedata
 from datetime import datetime, timezone
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _lib  # noqa: E402
+
 NOISE_BAND = 10  # 与两份评分卡的「分差>10分需复核」保持一致
-
-
-def usage_error(msg):
-    print("❌ " + msg)
-    print("用法: python3 eval_record.py {record|history|compare} --file <EVALS.jsonl> [--json ...]")
-    sys.exit(1)
-
-
-def dw(s):
-    return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in str(s))
-
-
-def truncate(s, width):
-    s = str(s)
-    if dw(s) <= width:
-        return s
-    out, used = "", 0
-    for c in s:
-        w = 2 if unicodedata.east_asian_width(c) in ("W", "F") else 1
-        if used + w > width - 1:
-            break
-        out += c
-        used += w
-    return out + "…"
-
-
-def load(path):
-    if not os.path.isfile(path):
-        return []
-    out = []
-    with open(path, encoding="utf-8") as f:
-        for n, line in enumerate(f, 1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                out.append(json.loads(line))
-            except ValueError as e:
-                print("⚠️  第 %d 行 JSON 解析失败，跳过: %s" % (n, e))
-    return out
+USAGE = "python3 eval_record.py {record|history|compare} --file <EVALS.jsonl> [--json ...]"
 
 
 def q_sig(rec):
@@ -77,45 +47,77 @@ def q_sig(rec):
     return tuple(sorted((q.get("id"), q.get("status")) for q in rec.get("questions", [])))
 
 
+def apply_artifact(rec, artifact_path):
+    """用档案的真实哈希与 version 校正记录，返回告警列表。
+
+    这是防呆：手抄 64 位哈希或版本号必然出错，而 artifact_sha256 是
+    「这次评的到底是哪一版」的唯一依据——错了整条记录就失去意义。
+    """
+    warnings = []
+    root = _lib.resolve_archive_dir(artifact_path)
+    dpath = os.path.join(root, "DISTILLATE.md")
+    if not os.path.isfile(dpath):
+        _lib.usage_error("--artifact 下未找到 DISTILLATE.md: " + dpath, USAGE)
+    digest = _lib.sha256_file(dpath)
+    fm, _ = _lib.parse_frontmatter(_lib.read_text(dpath))
+    version = (fm or {}).get("version")
+
+    for key, actual in (("artifact_sha256", digest), ("version", version)):
+        if actual is None:
+            continue
+        if key not in rec or _lib.is_null(rec.get(key)):
+            rec[key] = actual
+        elif rec.get(key) != actual:
+            warnings.append("%s 与档案不符：记录里是 %r，档案实际是 %r"
+                            % (key, rec.get(key), actual))
+    return warnings
+
+
 def cmd_record(args):
     path = args.get("--file")
     if not path:
-        usage_error("record 需要 --file")
+        _lib.usage_error("record 需要 --file", USAGE)
 
     raw = args.get("--json")
     if not raw and args.get("--from-file"):
-        try:
-            raw = open(args["--from-file"], encoding="utf-8").read()
-        except OSError as e:
-            usage_error("读取失败: %s" % e)
+        raw = _lib.read_text(args["--from-file"])
     if not raw:
-        usage_error("record 需要 --json 或 --from-file")
+        _lib.usage_error("record 需要 --json 或 --from-file", USAGE)
 
     try:
         rec = json.loads(raw)
     except ValueError as e:
-        usage_error("记录不是合法 JSON: %s" % e)
+        _lib.usage_error("记录不是合法 JSON: %s" % e, USAGE)
+
+    if not isinstance(rec, dict):
+        _lib.usage_error("记录必须是 JSON 对象", USAGE)
+
+    artifact_warnings = []
+    if args.get("--artifact"):
+        artifact_warnings = apply_artifact(rec, args["--artifact"])
 
     missing = [k for k in ("version", "artifact_sha256", "models", "scorers", "scores", "total")
-               if k not in rec]
+               if k not in rec or _lib.is_null(rec.get(k))]
     if missing:
-        usage_error("记录缺少必填字段: " + "、".join(missing))
+        _lib.usage_error("记录缺少必填字段: " + "、".join(missing)
+                         + "（可用 --artifact 自动填入 version / artifact_sha256）", USAGE)
     if not isinstance(rec.get("models"), dict) or "score" not in rec["models"]:
-        usage_error("models 必须是含 answer/score 的对象（评分必须独立于答题）")
+        _lib.usage_error("models 必须是含 answer/score 的对象（评分必须独立于答题）", USAGE)
     if not rec.get("questions"):
         print("⚠️  记录未内嵌题目集（questions）—— compare 将无法判断可比性")
 
-    rec.setdefault("schema_version", 1)
+    rec.setdefault("schema_version", _lib.SUPPORTED_SCHEMA_VERSION)
     rec.setdefault("date", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
     rec.setdefault("run_id", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
 
-    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    _lib.append_jsonl(path, rec)
 
     print("✅ 已追加评测记录: %s" % path)
     print("   version=%s total=%s grade=%s scorers=%s"
           % (rec.get("version"), rec.get("total"), rec.get("grade", "—"), rec.get("scorers")))
+    print("   artifact_sha256=%s…" % str(rec.get("artifact_sha256"))[:12])
+    for w in artifact_warnings:
+        print("   ⚠️  " + w)
     if rec.get("scorers", 0) < 2:
         print("   ⚠️  评分 agent 仅 %s 个 —— compare 不会给出趋势结论（噪声大于信号）"
               % rec.get("scorers"))
@@ -124,8 +126,8 @@ def cmd_record(args):
 def cmd_history(args):
     path = args.get("--file")
     if not path:
-        usage_error("history 需要 --file")
-    recs = load(path)
+        _lib.usage_error("history 需要 --file", USAGE)
+    recs = _lib.load_jsonl(path)
     if not recs:
         print("（无评测记录: %s）" % path)
         return
@@ -136,40 +138,28 @@ def cmd_history(args):
             if d not in dims:
                 dims.append(d)
 
-    W = [8, 12, 8, 8] + [max(8, dw(d) + 2) for d in dims]
-    line = "┌" + "┬".join("─" * w for w in W) + "┐"
-    sep = "├" + "┼".join("─" * w for w in W) + "┤"
-    end = "└" + "┴".join("─" * w for w in W) + "┘"
-
-    def row(cells):
-        o = "│"
-        for c, w in zip(cells, W):
-            s = truncate(c, w - 1)
-            pad = w - dw(s) - 1
-            o += " " + s + " " * (pad if pad > 0 else 0) + "│"
-        return o
-
-    print("评测历史: %s（%d 次）" % (path, len(recs)))
-    print(line)
-    print(row(["ver", "date", "total", "grade"] + dims))
-    print(sep)
+    W = [8, 12, 8, 8] + [max(8, _lib.dw(d) + 2) for d in dims]
+    rows = []
     for r in recs:
         sc = r.get("scores") or {}
-        print(row([r.get("version", "?"), r.get("date", "?"), r.get("total", "?"),
-                   r.get("grade", "—")] + [sc.get(d, "—") for d in dims]))
-    print(end)
+        rows.append([r.get("version", "?"), r.get("date", "?"), r.get("total", "?"),
+                     r.get("grade", "—")] + [sc.get(d, "—") for d in dims])
+
+    print("评测历史: %s（%d 次）" % (path, len(recs)))
+    for line in _lib.render_table(["ver", "date", "total", "grade"] + dims, [rows], W):
+        print(line)
 
 
 def cmd_compare(args):
     path = args.get("--file")
     if not path:
-        usage_error("compare 需要 --file")
+        _lib.usage_error("compare 需要 --file", USAGE)
     try:
         noise = int(args.get("--noise", NOISE_BAND))
-    except ValueError:
-        usage_error("--noise 必须是整数")
+    except (TypeError, ValueError):
+        _lib.usage_error("--noise 必须是整数", USAGE)
 
-    recs = load(path)
+    recs = _lib.load_jsonl(path)
     if len(recs) < 2:
         print("⚠️  只有 %d 次记录，无法对比。至少需要 2 次。" % len(recs))
         return
@@ -210,27 +200,11 @@ def cmd_compare(args):
     total_delta = (cur.get("total") or 0) - (prev.get("total") or 0)
 
     W = [22, 8, 8, 8]
-    line = "┌" + "┬".join("─" * w for w in W) + "┐"
-    sep = "├" + "┼".join("─" * w for w in W) + "┤"
-    end = "└" + "┴".join("─" * w for w in W) + "┘"
-
-    def row(cells):
-        o = "│"
-        for c, w in zip(cells, W):
-            s = truncate(c, w - 1)
-            pad = w - dw(s) - 1
-            o += " " + s + " " * (pad if pad > 0 else 0) + "│"
-        return o
-
-    print(line)
-    print(row(("维度", "上版", "本版", "Δ")))
-    print(sep)
-    for d in dims:
-        dv = deltas[d]
-        print(row((d, prev["scores"][d], cur["scores"][d], ("%+d" % dv) if dv else "0")))
-    print(sep)
-    print(row(("总分", prev.get("total"), cur.get("total"), "%+d" % total_delta)))
-    print(end)
+    dim_rows = [(d, prev["scores"][d], cur["scores"][d], ("%+d" % deltas[d]) if deltas[d] else "0")
+                for d in dims]
+    total_row = [("总分", prev.get("total"), cur.get("total"), "%+d" % total_delta)]
+    for line in _lib.render_table(("维度", "上版", "本版", "Δ"), [dim_rows, total_row], W):
+        print(line)
 
     # ---- 结论 ----
     print("")
@@ -243,7 +217,8 @@ def cmd_compare(args):
         return
 
     if abs(total_delta) <= noise:
-        print("⚠️  总分变化 %+d，落在噪声带（±%d）内 —— 分不出是真变化还是抖动。" % (total_delta, noise))
+        print("⚠️  总分变化 %+d，落在噪声带（±%d）内 —— 分不出是真变化还是抖动。"
+              % (total_delta, noise))
         print("   建议：加跑第二个评分 agent，看分差是否稳定。")
         return
 
@@ -261,15 +236,13 @@ def cmd_compare(args):
 
 def main():
     argv = sys.argv[1:]
-    if not argv:
-        usage_error("缺少子命令")
-    if argv[0] in ("-h", "--help"):
+    if not argv or argv[0] in ("-h", "--help"):
         print(__doc__)
-        sys.exit(0)
+        sys.exit(0 if argv else 1)
 
     cmd = argv[0]
     if cmd not in ("record", "history", "compare"):
-        usage_error("未知子命令: " + cmd)
+        _lib.usage_error("未知子命令: " + cmd, USAGE)
 
     args, i = {}, 1
     while i < len(argv):

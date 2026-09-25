@@ -2,7 +2,8 @@
 name: distill
 description: |
   蒸馏提炼：把任意原始素材（PDF/长文/访谈transcript/字幕/会议纪要/聊天记录/笔记/网页/代码库）蒸馏成高浓度、可溯源、可复用的结构化认知档案。
-  三种预设 schema：人物 / 主题 / 文档，也支持自定义维度。产出是**档案**不是人格——档案可直接阅读，也可喂给 拘神.skill 铸人格。
+  三种预设 schema：人物 / 主题 / 文档，也支持自定义维度。产出是**结构化档案**——可直接阅读，
+  也可作为任何下游用途的输入。档案自带信度、出处、矛盾与缺口，可独立交付使用。
   触发词：「蒸馏」「提炼」「萃取」「精炼」「提纯」「distill」「把这堆材料蒸馏一下」「从这些资料里提取要点」「帮我梳理成体系」。
   English triggers: "distill this", "extract the essence", "turn these materials into structured knowledge".
   不适用：只是要一段摘要或翻译（那是摘要不是蒸馏）；素材不足一页；用户要的是直接答案而非档案。
@@ -48,7 +49,7 @@ description: |
 | schema = 主题（领域/方法论） | `references/schema-topic.md` |
 | schema = 文档（论文/书籍/代码库/纪要/聊天记录） | `references/schema-document.md` |
 | **要把 N 份档案综合成一份**（跨档案：共识/分歧/断层线） | `references/meta-synthesis.md` |
-| 需要写档案、或要与 拘神.skill 对接 | `references/artifact-format.md` |
+| 需要写档案、或要了解档案格式契约 | `references/artifact-format.md` |
 | Phase 5 独立质检 | `references/quality-scorecard.md` |
 | Phase 5.5 对抗精炼 | `references/adversarial-refine.md` |
 
@@ -120,8 +121,10 @@ distilled/<slug>/
 ├── DISTILLATE.md      # 主档案（Phase 4 填充）
 ├── manifest.json      # 素材清单 + 维度状态 + 变更记录
 ├── research/          # 分维度提炼底稿
-├── sources/           # 原始素材（books/ transcripts/ articles/ notes/ chat/ other/）
-└── QUALITY.md         # 评分卡（Phase 5 填充）
+├── sources/           # 原始素材（books/ transcripts/ articles/ notes/ chat/ code/ video/ other/）
+├── QUALITY.md         # 评分卡（Phase 5 填充，重跑覆盖）
+├── REFINE.md          # 对抗精炼补丁候选（Phase 5.5 填充，重跑覆盖）
+└── EVALS.jsonl        # 评测历史（追加式，只增不改）
 ```
 
 **完成检查**：
@@ -211,6 +214,17 @@ distilled/<slug>/
 - 发现矛盾**直接记录，不要调和**
 - 注明素材出处（文件路径或 URL），便于 Phase 5 溯源抽查
 
+#### 出处与信度的写法（可机械检查）
+
+行尾一对括号写全「信度 + 出处」，中间用 `·` 分隔：
+
+```markdown
+- 用可逆性判断替代预测，只在错了也不致命时下注（A · sources/notes/note1.md）
+```
+
+`（A）` 也认，但**只写信度不写出处**会被 `quality_check.py` 列为软诊断。
+`（A 方案）` 这类正文括号不会被误判为元数据。完整规则见 `references/artifact-format.md` §2.3。
+
 #### Agent prompt 模板
 
 ```
@@ -290,7 +304,20 @@ distilled/<slug>/
 | 信息缺口 | Phase 3.4 |
 | 变更记录 | 本次动作 |
 
-**同步更新 `manifest.json`**：维度状态、coverage、sources、changes、`distillate_sha256`。
+**同步更新 `manifest.json`**：维度状态、coverage、sources、changes。
+**未判定的字段写 `null`，不要写 `0`**——`0` 是「判定为没有」，`null` 是「还没判」（铁律 1 在数据层的体现）。
+
+#### 封存档案哈希（必做）
+
+档案正文定稿后**必须**封存哈希，否则下游的漂移检测会静默失效：
+
+```bash
+python3 scripts/seal.py distilled/<slug>          # 写入 distillate_sha256
+python3 scripts/seal.py distilled/<slug> --check  # 校验是否过期
+```
+
+**档案一改，哈希就过期**。`quality_check.py` 会把它当硬性 FAIL 拦截——这不是形式主义：
+`distillate_sha256` 是「下游产物是否还基于当前这版档案」的唯一异地依据。
 
 #### 浓度自检
 
@@ -303,6 +330,23 @@ distilled/<slug>/
 ### Phase 5: 独立质检
 
 **⚠️ 蒸馏 agent 与评分 agent 必须是两个独立 agent，绝不自评自证。**
+
+#### 5.0 先跑静态质检（机械关）
+
+```bash
+python3 scripts/quality_check.py distilled/<slug>          # 人读
+python3 scripts/quality_check.py distilled/<slug> --json   # 机器读
+```
+
+**7 项硬检查**：frontmatter 完整性 / 核心骨架 3-10 条 / 信度标记与 D 级占比 /
+矛盾保留与分类（含和稀泥检测）/ 缺口诚实 / 浓度 / manifest 契约与哈希封存。
+
+外加一组**软诊断**：前后端信度分布不一致、骨架缺出处指针、coverage 未回填、
+自报字数与压缩比偏差、manifest 与正文 version 不一致等。软诊断是线索不是评分。
+
+静态质检不过 → 先修结构，**别急着进评分卡**。
+
+#### 5.1 再跑独立评分卡
 
 1. 读 `references/quality-scorecard.md`
 2. **出题**：3 道生成力题（素材未覆盖但相关）+ 1 道缺口题 + 1 道溯源抽查（随机抽 3 条骨架）
@@ -319,10 +363,14 @@ distilled/<slug>/
 `QUALITY.md` 每次重跑都被覆盖，**分数历史会丢**。所以每次评分后追加一条到 `EVALS.jsonl`：
 
 ```bash
-python3 scripts/eval_record.py record --file distilled/<slug>/EVALS.jsonl --json '{...}'
+python3 scripts/eval_record.py record --file distilled/<slug>/EVALS.jsonl \
+    --json '{...}' --artifact distilled/<slug>
 ```
 
 记录必须含 `version` / `artifact_sha256` / `models`（答题与评分两个模型）/ `scorers` / **内嵌题目集**。
+
+> **`version` 与 `artifact_sha256` 用 `--artifact` 自动填，不要手抄。**
+> 手抄 64 位哈希必然出错，而这个字段是「这次评的到底是哪一版」的唯一依据。
 
 > **题目内嵌在记录里，不做全局题库。** 档案会变，全局固定题库会与之脱节。
 > 尤其：缺口补上后，缺口题的正确答案从「拒答」变成「真答」，而评分规则仍把拒答记为正确
@@ -363,56 +411,12 @@ python3 scripts/eval_record.py record --file distilled/<slug>/EVALS.jsonl --json
 
 **告知用户下一步**：
 - 想直接读 → 打开 `DISTILLATE.md`
-- 想铸成人格 → 用 拘神.skill 读这份档案
-- 想多人对谈 → 用 拘神.skill 组人格组（`panel`），议题可取自本档案的分歧段
+- 想当作下游输入 → 档案是自包含的只读产物，格式契约见 `references/artifact-format.md`
 - 想增量补充 → 说「补充蒸馏」，走下方流程
+- 想复核质量 → 看 `QUALITY.md`；历史分数在 `EVALS.jsonl`
 
-#### 6.1 消费使用反馈（只读，形成闭环）
-
-人格在使用中暴露的失败，由 拘神.skill 写进**它自己的**目录（`~/.claude/skills/<slug>-persona/FEEDBACK.jsonl`）。distill **只读**汇总：
-
-```bash
-python3 scripts/feedback.py ~/.claude/skills/*-persona/
-```
-
-**输出什么**：被反复命中的问题（真缺口）、涉及最多的档案位置、以及**忠实沉默的频率**。
-
-**⚠️ 关键语义**：`faithful_silence`（忠实沉默）**不计入缺陷**。
-
-> 拒答在本系统里常常是**正确行为**——gaps 映射、结构性沉默、伦理红线都要求拒答。
-> 若把它当缺陷，就会被推着去「补上」这个缺口，从而**为刻意保持沉默的人编造立场**——
-> 违反 `distillation-framework.md` §九「不要替他生成立场」，并被评分卡判 0 分。
-> 记录它只为统计频率，不是为了让 distill 去修。
-
-**归属约束**：distill **不写**人格目录，只读。档案归 distill 管，人格归 summon 管。
-
-**闭环链路**（注意触发点）：
-
-```
-使用暴露失败 → summon 写 FEEDBACK.jsonl（人格目录，不影响档案哈希）
-    ↓ 【人工】用户跑「补充蒸馏」，distill 只读汇总
-distill 更新 gaps/条目 → version++ → DISTILLATE.md 哈希变
-    ↓
-roster.py 这时才报 stale → 重铸人格 → eval_record.py compare 验证是否真变好
-```
-
-**追加 FEEDBACK.jsonl 不会触发漂移检测**——`roster.py` 只哈希 `DISTILLATE.md`。
-触发点是 **distill 的更新动作**，不是 summon 的写入。这条链需要一次人工介入，不存在全自动闭环。
-
----
-
-### Phase 6.5: 消费反馈后的增量更新
-
-用户跑「补充蒸馏」且存在反馈时：
-
-1. `python3 scripts/feedback.py` 汇总 → 得到真缺口清单（**已排除忠实沉默**）
-2. 对 `in_scope_gap`：该维度底稿不够厚 → 补素材或补提炼
-3. 对 `wrong_stance`：**先复核**档案对应条目的信度与出处（附了反证指针才计入）
-4. 对 `style_drift`：这是人格侧问题，不属于档案 → 提示用户重铸人格时加强表达DNA
-5. 更新 `gaps` / 条目 → `version` +1 → 重算 `distillate_sha256`
-6. 提示用户：档案已更新，`roster.py` 会报 stale，建议重铸相关人格
-
-**无证据指针的反馈**：按铁律3 视为**意见**，不得据此修改档案。`feedback.py` 会单独列出这类记录。
+**交付即定型**：`DISTILLATE.md` 的哈希已封存。任何后续改动都必须重新 `seal.py`，
+否则下游会认为手里的产物仍与档案同步——而实际上档案已经变了。
 
 ---
 
@@ -427,9 +431,40 @@ roster.py 这时才报 stale → 重铸人格 → eval_record.py compare 验证�
 3. **只重跑受影响的维度**，未受影响的维度直接复用现有 `research/` 底稿
 4. 更新 `DISTILLATE.md`：新增条目追加，**被新素材推翻的旧条目保留并标注「已被 X 修正」**（不要静默删除——演化轨迹本身是信息）
 5. `manifest.json` 的 `changes` 追加记录，`version` +1，`updated` 更新
-6. 重算信度分布与蒸馏比
+6. 重算信度分布与蒸馏比；回填 `coverage` 与一手/二手计数（未判定的写 `null`）
+7. **重新封存哈希**：`python3 scripts/seal.py distilled/<slug>`（不封存则 `quality_check.py` 报哈希过期）
+8. 跑 `python3 scripts/quality_check.py distilled/<slug>` 确认结构未破
 
 **增量蒸馏不重跑全流程。** 这是它与「重新蒸一遍」的核心区别。
+
+---
+
+## 工具与测试
+
+`scripts/` 全部为**纯标准库 Python**（skill 必须自包含，不引入第三方依赖）。
+
+| 脚本 | 职责 | 读写 |
+|------|------|------|
+| `_lib.py` | **唯一事实源**：契约常量、frontmatter 子集解析、信度统计、表格渲染、哈希 | 库 |
+| `ingest.py` | 素材归集；生成/增量更新 `manifest.json` | 写 manifest |
+| `seal.py` | 计算并写入 `distillate_sha256`（`--check` 只校验） | 写 manifest |
+| `quality_check.py` | 7 项结构检查 + 软诊断（契约的可执行形式） | 只读 |
+| `distill_report.py` | Phase 1.5 / 2.5 检查点摘要表 | 只读 |
+| `meta_scan.py` | 跨档案：来源重叠 / slug 碰撞 / 候选对照矩阵 / 互补缺口 | 只读 |
+| `eval_record.py` | `EVALS.jsonl` 写入 / 历史 / 对比 | 只追加 |
+
+```bash
+python3 -m unittest discover -s test -v      # 测试套件
+```
+
+**契约同步**：`references/artifact-format.md` 是契约的**权威定义**，`scripts/` 只是它的
+**可执行形式**。改字段名 / 枚举 / 目录名 / 检查规则，必须同时改两边——
+`test/test_distill.py::TestContractSync` 会检查是否漂移。
+`_lib.sha256_file` 的算法是契约的一部分（`distillate_sha256` 靠它），**不要动**——
+测试用黄金值钉死了它。
+
+**脚本只做机械活**：解析、统计、渲染、哈希。语义判断（两条主张是否在回答同一个问题、
+某维度覆盖度打几分）永远由 agent 做（反模式 #16）。
 
 ---
 
@@ -479,11 +514,14 @@ roster.py 这时才报 stale → 重铸人格 → eval_record.py compare 验证�
 | 11 | 靠加长正文刷浓度分 | 浓度看的是独立条目数，不是字数。灌水只会稀释 |
 | 12 | 把确认检查点变成交付阻塞 | 检查点是让用户纠偏，不是扣住产出。能给默认值就给默认值 |
 | 13 | 把来源重叠的档案当独立佐证 | 两份档案共享同一素材时，「两人共识」只是**一份素材数了两次**。必须先跑 `meta_scan.py` 的重叠检测（综合档案） |
-| 14 | 把「忠实沉默」当缺陷去修 | 拒答在 gaps 映射、结构性沉默、伦理红线场景下**是正确行为**。把它当缺陷会逼你为刻意沉默的人编造立场——违反 framework §九，评分卡判 0 分 |
+| 14 | 把「主动不公开」当成待补的缺口 | 主体刻意回避的话题本身是**信息**，应标注「主动不公开」而非「信息缺失」。把它当缺口去补，就会为刻意沉默的人编造立场——违反 framework §九，评分卡判 0 分 |
 | 15 | 用单次评分当精炼闸门 | 单次 LLM 评分噪声 ±5–10 分。用「必须提升否则回滚」当闸门，一半概率放过假修复、一半概率回滚真修复。质量信号应来自第二独立评分 agent |
 | 16 | 让脚本做语义判定 | 脚本只做机械抽取（对照矩阵、重叠检测、静态检查）。「这两条是不是在回答同一个问题」「是不是真对立」必须由 agent 读语义判断 |
 | 17 | 缺口填上后不退役对应题目 | 缺口题的正确答案会从「拒答」变成「真答」，不标 `retired` 就会得出「越完整分越低」的假退步 |
 | 18 | 无证据指针的反馈直接改档案 | 无出处的反馈是**意见**不是缺陷。铁律3 禁止据此行动 |
+| 19 | 把「未回填」写成 0 | `0` 是判定结果（确实没有），`null` 是没判。写成 0 会让评分卡的覆盖度规则与 `meta_scan.py` 的互补缺口判定把「没数」当成「数出来是零」。未判定就写 `null`——铁律1 在数据层的体现 |
+| 20 | 手抄 `artifact_sha256` / `version` | 64 位哈希手抄必然出错，而它是「这次评的是哪一版」的唯一依据。用 `--artifact` 自动填 |
+| 21 | 档案改完不重新封存哈希 | 哈希过期 → 下游会误判「产物仍与档案同步」，而档案其实已经变了。`seal.py` 封存，`quality_check.py` 会硬性拦截 |
 
 ---
 
@@ -492,14 +530,3 @@ roster.py 这时才报 stale → 重铸人格 → eval_record.py compare 验证�
 蒸馏的产物不是「这堆材料讲了什么」，而是**「拿这套认知，你能想到什么原来想不到的」**。
 
 一份好档案是一副能戴上的镜片，不是一段更短的原文。
-
-## 版本自检（静默）
-
-本节给 AI agent：每次使用本 skill 前，先做一个不联网的判断——读本 skill 目录（SKILL.md 所在目录）下的 `.last-update-check` 文件（内容为一行日期 YYYY-MM-DD）。文件存在且距今不足 30 天，跳过本节直接干活，不向用户提任何更新相关的话。
-
-到期或文件不存在时，且仅在此时：
-
-1. 本目录不是 git 克隆（无 `.git` 或无 origin）→ 写入今天日期后跳过本节
-2. 对比版本：`git -C <本目录> rev-parse HEAD` 与 `git -C <本目录> ls-remote origin HEAD`
-3. 无论结果如何，把今天日期写入 `.last-update-check`
-4. 两者一致 → 什么都不说；确认落后 → 先完成用户当前任务，结束后附一句「本 skill 有新版本，可用 `git -C <本目录> pull --ff-only` 更新」。是否更新由用户决定，不要主动执行更新

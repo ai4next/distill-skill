@@ -15,8 +15,8 @@
 | 可溯源 | 每条主张带信度等级和出处，能追回原文 |
 | **跨档案综合** | N 份档案 → 共识骨架 / 分歧图谱 / 断层线 / 互补缺口 |
 | 增量更新 | 新素材进来只重跑受影响的维度，不全量重来 |
-| 越用越准 | 只读汇总人格的使用反馈，发现真缺口并更新档案 |
-| 铸人格的前置 | 产出可直接喂给 [拘神.skill](https://github.com/ai4next/summon-skill) 铸成人格 |
+| 质量可验证 | 7 项静态检查 + 独立评分卡 + 对抗精炼，分数历史可对比 |
+| 可独立交付 | 档案自包含、格式有契约、内容有哈希；不依赖任何其他 skill |
 
 ## 蒸馏不是摘要
 
@@ -33,7 +33,7 @@
 
 ```
 入口分流 → 素材归集 → 🔴清点确认 → 分维度提炼 → 🔴质量确认
-        → 交叉验证 → 档案合成 → 独立质检 → 交付
+        → 交叉验证 → 档案合成 → 封存哈希 → 静态质检(7项) → 独立评分 → 对抗精炼 → 交付
 ```
 
 三种预设 schema：
@@ -53,6 +53,7 @@
 - **三重验证** — 跨域复现 + 生成力 + 排他性，全过才进核心骨架
 - **矛盾三类** — 时间性 / 领域性 / 本质张力，保留不调和
 - **蒸馏比** — 压缩率与浓度，每千字 8-15 条独立条目为健康区间
+- **出处与信度同行** — `主张……（A · sources/books/x.pdf）`，让可溯源性与信度都可机械检查
 
 ## 目录结构
 
@@ -66,19 +67,46 @@ distill-skill/
 │   ├── schema-topic.md               # 主题 schema
 │   ├── schema-document.md            # 文档 schema
 │   ├── meta-synthesis.md             # 跨档案综合（共识/分歧/断层线/独立性规则）
-│   ├── artifact-format.md            # 档案格式契约（含 EVALS.jsonl）
+│   ├── artifact-format.md            # 档案格式契约（含 EVALS.jsonl、null 语义、校验工具）
 │   ├── quality-scorecard.md          # 蒸馏质量评分卡
 │   └── adversarial-refine.md         # 对抗精炼（信度/浓度攻击者）
-└── scripts/
-    ├── ingest.py                     # 素材归集 + 生成/增量更新 manifest.json
-    ├── meta_scan.py                  # 跨档案对照矩阵 + 来源重叠检测
-    ├── distill_report.py             # 检查点摘要表
-    ├── quality_check.py              # 档案静态质检（6 项）
-    ├── feedback.py                   # 只读汇总人格使用反馈
-    └── eval_record.py                # 评测历史记录与对比（拒绝过度断言）
+├── scripts/                          # 纯标准库 Python
+│   ├── _lib.py                       # 唯一事实源（契约常量/解析/统计/渲染/哈希）
+│   ├── ingest.py                     # 素材归集 + 生成/增量更新 manifest.json
+│   ├── seal.py                       # 封存 distillate_sha256（--check 只校验）
+│   ├── quality_check.py              # 档案静态质检（7 项硬检查 + 软诊断）
+│   ├── distill_report.py             # 检查点摘要表
+│   ├── meta_scan.py                  # 跨档案对照矩阵 + 来源重叠/slug 碰撞检测
+│   └── eval_record.py                # 评测历史记录与对比（拒绝过度断言）
+└── test/
+    └── test_distill.py               # 测试套件（python3 -m unittest discover -s test -v）
 ```
 
 产出落在用户工作区 `distilled/<slug>/`，不在 skill 目录内——skill 必须自包含。
+
+## 质量门
+
+档案定稿前跑两道机械关，再进独立 agent 评分：
+
+```bash
+python3 scripts/seal.py distilled/<slug>            # 封存内容哈希（下游漂移检测依据）
+python3 scripts/quality_check.py distilled/<slug>   # 7 项硬检查 + 软诊断
+```
+
+7 项硬检查：frontmatter 完整性 / 核心骨架 3-10 条 / 信度标记与 D 级占比 /
+矛盾保留与分类（含和稀泥检测）/ 缺口诚实 / 浓度 / manifest 契约与哈希封存。
+
+**`null` ≠ `0`**：脚本无法判定的字段（`coverage`、一手/二手计数）写 `null` 表示「未回填」，
+`0` 表示「判定为没有」。混淆会让下游把「没数」当成「数出来是零」。
+
+跑测试：
+
+```bash
+python3 -m unittest discover -s test -v
+```
+
+`references/artifact-format.md` 是契约的权威定义，`scripts/` 是它的可执行形式——
+改一边必须改另一边，`test_distill.py::TestContractSync` 会检查漂移。
 
 ## 跨档案综合
 
@@ -99,24 +127,18 @@ python3 scripts/meta_scan.py distilled/munger distilled/buffett distilled/lynch 
 
 综合档案产出：共识骨架 / 分歧图谱 / 共享心智模型 / 互补缺口 / **断层线**（分歧的价值观根源）/ 涌现结论。
 
-## 组合剧本：越用越准
+## 增量更新
 
 ```
-① 蒸馏素材        → distilled/<slug>/DISTILLATE.md
-② 铸成人格        → 拘神.skill 读档案铸 *-persona
-③ 使用中暴露失败  → summon 写 FEEDBACK.jsonl（人格自己的目录）
-④ 只读汇总反馈    → python3 scripts/feedback.py ~/.claude/skills/*-persona/
-⑤ 补素材、更新档案 → version++ ，DISTILLATE.md 哈希变
-⑥ 重铸 + 验证     → roster 报 stale → 重铸 → eval_record.py compare 看是否真变好
+① 补素材          → python3 scripts/ingest.py <新素材> --out distilled/<slug>
+② 只重跑受影响维度 → 复用未受影响的 research/ 底稿
+③ 更新档案         → version++ ，标注「已被 X 修正」而非静默删除
+④ 重新封存         → python3 scripts/seal.py distilled/<slug>
+⑤ 复检             → quality_check.py 确认结构未破；eval_record.py compare 看是否真变好
 ```
 
-**两点如实说明**：
-
-- **忠实沉默不计入缺陷**。拒答在 gaps 映射、结构性沉默、伦理红线场景下都是**正确行为**。
-  把它当缺陷会逼 distill 为刻意沉默的人编造立场——那是评分卡判 0 分的行为。所以 `feedback.py`
-  把它单独统计，只报频率。
-- **不是全自动闭环**。写 `FEEDBACK.jsonl` **不会**触发漂移检测（它不改档案哈希）。
-  真实链路需要用户跑一次「补充蒸馏」，distill 更新档案后哈希才变，roster 这时才报 stale。
+**档案是自包含的**：`DISTILLATE.md` + `manifest.json` 即可独立交付；
+`research/` 供溯源，`EVALS.jsonl` 留分数历史。不依赖任何其他 skill 或外部目录。
 
 ## 安装
 
