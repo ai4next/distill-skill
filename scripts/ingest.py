@@ -71,20 +71,50 @@ def read_text(path):
     return None
 
 
-def iter_files(paths):
-    """展开文件与目录，跳过隐藏文件与常见噪音。"""
+def iter_files(paths, out_dir=None):
+    """展开文件与目录，跳过隐藏文件、常见噪音，以及**档案自己生成的文件**。
+
+    排除 out_dir 里的 `DISTILLATE.md` / `manifest.json` / `research/` 等：
+    用户很自然会敲 `ingest.py distilled/munger --out distilled/munger`（想把新丢进
+    sources/ 的文件补进来），此时若不做排除，档案本体、清单和底稿会被当成素材
+    复制进 `sources/` —— 清单凭空膨胀，而且 `manifest.json` 会被归类成 **chat**
+    （`.json` 在 TYPE_BY_EXT 里）。`sources/` 本身不排除：里面的文件已被清单收录，
+    sha256 判重会跳过，保留这条路径才能让「补素材」照常工作。
+    """
     skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv", ".idea", ".vscode"}
+    archive_files = {"DISTILLATE.md", "manifest.json", "EVALS.jsonl",
+                     "QUALITY.md", "REFINE.md", "meta_scan.json"}
+    out_abs = os.path.abspath(out_dir) if out_dir else None
+
+    def is_archive_artifact(p):
+        """p 是不是「档案自己生成的东西」（而非用户提供的素材）？"""
+        if out_abs is None:
+            return False
+        ap = os.path.abspath(p)
+        if not ap.startswith(out_abs + os.sep):
+            return False
+        rel = os.path.relpath(ap, out_abs)
+        head = rel.split(os.sep)[0]
+        return head == "research" or os.path.basename(ap) in archive_files
+
     for p in paths:
         p = os.path.abspath(os.path.expanduser(p))
         if os.path.isfile(p):
-            yield p
+            if not is_archive_artifact(p):
+                yield p
         elif os.path.isdir(p):
             for root, dirs, files in os.walk(p):
                 dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
+                # 目录名也排序：素材编号 S001… 必须与文件系统返回顺序无关，
+                # 否则同一批素材在两台机器上会分到不同编号，增量蒸馏的
+                # sha256 判重虽然仍有效，但清单会前后不一致。
+                dirs.sort()
                 for name in sorted(files):
                     if name.startswith(".") or name == ".DS_Store":
                         continue
-                    yield os.path.join(root, name)
+                    fpath = os.path.join(root, name)
+                    if not is_archive_artifact(fpath):
+                        yield fpath
         else:
             print("⚠️  路径不存在，跳过: " + p)
 
@@ -175,22 +205,24 @@ def main():
         print("⚠️  现有 manifest.json 结构异常，将重建")
         old = None
     old = old or {}
-    old_sources = {s.get("sha256"): s for s in old.get("sources", []) if s.get("sha256")}
-    sources = list(old.get("sources", []))
+    # 判重表：**本次运行新加的也要记进去**。只拿运行前的快照比对的话，
+    # 同一批里两个内容相同的文件会被各记一条（sha256 完全相同），
+    # 要再跑一次才去重——「sha256 相同的素材跳过，不重复计入」就成了假承诺。
+    known = {s.get("sha256"): s for s in _lib.manifest_sources(old) if s.get("sha256")}
+    sources = list(_lib.manifest_sources(old))
     sid = next_source_id(sources)
 
     added, skipped, need_text = [], [], []
     today = date.today().isoformat()
 
-    for path in iter_files(args.paths):
-        try:
-            digest = _lib.sha256_file(path)
-        except OSError as e:
-            print("⚠️  读取失败，跳过: %s (%s)" % (path, e))
+    for path in iter_files(args.paths, out_dir):
+        digest = _lib.sha256_file(path)
+        if digest is None:
+            print("⚠️  读取失败，跳过: %s" % path)
             continue
 
-        if digest in old_sources:
-            skipped.append(old_sources[digest].get("path", path))
+        if digest in known:
+            skipped.append(known[digest].get("path", path))
             continue
 
         type_name = classify(path)
@@ -198,8 +230,8 @@ def main():
         dest = os.path.join(dest_dir, os.path.basename(path))
         # 避免把已在 sources/ 下的文件再复制一次
         if os.path.abspath(os.path.dirname(path)) != os.path.abspath(dest_dir):
-            base, n = os.path.basename(path), 1
-            stem, ext = os.path.splitext(base)
+            stem, ext = os.path.splitext(os.path.basename(path))
+            n = 1
             while os.path.exists(dest):
                 dest = os.path.join(dest_dir, "%s-%d%s" % (stem, n, ext))
                 n += 1
@@ -215,7 +247,7 @@ def main():
             need_text.append(os.path.relpath(dest, out_dir))
 
         rel = os.path.relpath(dest, out_dir)
-        sources.append({
+        entry = {
             "id": "S%03d" % sid,
             "path": rel,
             "origin": "local",
@@ -226,18 +258,22 @@ def main():
             "sha256": digest,
             "added": today,
             "dimensions": [],
-        })
+        }
+        sources.append(entry)
+        known[digest] = entry          # 本次运行内也去重（见上方 known 的说明）
         added.append((rel, type_name, words))
         sid += 1
 
     # 维度状态：research/ 下有对应文件即 partial/complete
-    old_dims = {d.get("name"): d for d in old.get("dimensions", [])}
+    old_dims = {d.get("name"): d for d in _lib.manifest_dimensions(old)}
     dimensions = []
     for did, name, fname in dims:
         fpath = os.path.join(out_dir, "research", fname)
         if os.path.isfile(fpath):
             body = _lib.read_text(fpath)
-            status = "complete" if len(body) > 800 else "partial"
+            # 用 count_words 而不是 len()：库里所有字数口径都是「CJK 按字、拉丁按词」，
+            # 用字符数会让 900 字符的英文底稿（≈150 词）被误判成 complete。
+            status = "complete" if _lib.count_words(body) > 800 else "partial"
         else:
             status = "missing"
         prev = migrate_unfilled_dim(old_dims.get(name, {}))
@@ -253,6 +289,11 @@ def main():
         })
 
     total_words = sum(s["words"] or 0 for s in sources)
+    # version 可能是手改成 null / 字符串的——直接 +1 会 TypeError，
+    # 让「补素材」这条主路径整个挂掉。非整数一律当 0 处理。
+    old_version = old.get("version")
+    if not isinstance(old_version, int) or isinstance(old_version, bool):
+        old_version = 0
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "slug": slug,
@@ -260,7 +301,7 @@ def main():
         "title": args.title or old.get("title") or slug,
         "created": old.get("created", today),
         "updated": today,
-        "version": (old.get("version", 0) + (1 if added else 0)) or 1,
+        "version": (old_version + (1 if added else 0)) or 1,
         "sources": sources,
         "source_words": total_words,
         "sources_primary": old.get("sources_primary"),
@@ -270,6 +311,11 @@ def main():
         # 综合档案专用字段：普通档案为 null / []
         "meta_sources": old.get("meta_sources"),
         "source_overlap": old.get("source_overlap", []),
+        # 留出验证与冻结题目（契约 §三）。留出集在 Phase 0 由 agent 填入；
+        # 题目在 Phase 2 之前出好后落盘，此后**不得增删改**——先有题、后有档案，
+        # 是防「出题污染」的唯一办法（见 quality-scorecard.md「出题纪律」）。
+        "heldout": old.get("heldout", []),
+        "questions": old.get("questions", []),
         "changes": old.get("changes", []) + ([{
             "date": today,
             "action": "ingest",

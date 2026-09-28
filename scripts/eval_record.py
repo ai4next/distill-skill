@@ -38,13 +38,37 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _lib  # noqa: E402
 
-NOISE_BAND = 10  # 与两份评分卡的「分差>10分需复核」保持一致
+NOISE_BAND = 10  # 与 quality-scorecard.md「分差>10分需复核」保持一致
 USAGE = "python3 eval_record.py {record|history|compare} --file <EVALS.jsonl> [--json ...]"
 
 
 def q_sig(rec):
     """题目集签名：id + status。任何变化都意味着两次评测不可直接比较。"""
     return tuple(sorted((q.get("id"), q.get("status")) for q in rec.get("questions", [])))
+
+
+def as_number(value):
+    """把记录里的一个值容错成 float；不是数字返回 None。
+
+    `EVALS.jsonl` 是**只增不改**的流水。手工追加的一条记录里，`total` 写成
+    `"82"`、`scorers` 写成 `null`，都会让 `compare` 直接 TypeError——而
+    「拒绝过度断言」这个核心价值的前提是它能一直跑得起来。一条坏记录不该
+    把整条流水线变成不可用。
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def as_int(value, default=0):
+    """`as_number` 的整数版；不可解析时返回 default。"""
+    n = as_number(value)
+    return default if n is None else int(n)
 
 
 def apply_artifact(rec, artifact_path):
@@ -118,7 +142,7 @@ def cmd_record(args):
     print("   artifact_sha256=%s…" % str(rec.get("artifact_sha256"))[:12])
     for w in artifact_warnings:
         print("   ⚠️  " + w)
-    if rec.get("scorers", 0) < 2:
+    if as_int(rec.get("scorers")) < 2:
         print("   ⚠️  评分 agent 仅 %s 个 —— compare 不会给出趋势结论（噪声大于信号）"
               % rec.get("scorers"))
 
@@ -190,17 +214,20 @@ def cmd_compare(args):
         blockers.append("题目集已变化：" + "，".join(detail) +
                         "\n      缺口被补上后原题失效，直接比会得出「越完整分越低」的假退步")
 
-    if min(prev.get("scorers", 1), cur.get("scorers", 1)) < 2:
+    if min(as_int(prev.get("scorers")), as_int(cur.get("scorers"))) < 2:
         blockers.append("评分 agent 少于 2 个（%s / %s）—— 单次 LLM 评分噪声 ±5-10 分，"
                         "不足以支撑趋势结论" % (prev.get("scorers"), cur.get("scorers")))
 
-    # 逐维 delta
-    dims = [d for d in (cur.get("scores") or {}) if d in (prev.get("scores") or {})]
-    deltas = {d: cur["scores"][d] - prev["scores"][d] for d in dims}
-    total_delta = (cur.get("total") or 0) - (prev.get("total") or 0)
+    # 逐维 delta。只比**两边都是数字**的维度：一边写 "13"、一边写 13 是同一件事，
+    # 而一边写 "—" 一边写 13 则无从比较——后者若强行相减就会 TypeError。
+    pscores, cscores = prev.get("scores") or {}, cur.get("scores") or {}
+    dims = [d for d in cscores if d in pscores
+            and as_number(cscores[d]) is not None and as_number(pscores[d]) is not None]
+    deltas = {d: as_number(cscores[d]) - as_number(pscores[d]) for d in dims}
+    total_delta = as_int(cur.get("total")) - as_int(prev.get("total"))
 
     W = [22, 8, 8, 8]
-    dim_rows = [(d, prev["scores"][d], cur["scores"][d], ("%+d" % deltas[d]) if deltas[d] else "0")
+    dim_rows = [(d, pscores[d], cscores[d], ("%+g" % deltas[d]) if deltas[d] else "0")
                 for d in dims]
     total_row = [("总分", prev.get("total"), cur.get("total"), "%+d" % total_delta)]
     for line in _lib.render_table(("维度", "上版", "本版", "Δ"), [dim_rows, total_row], W):

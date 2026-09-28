@@ -73,6 +73,23 @@ SCHEMA_DIMENSIONS = {
     ],
 }
 
+#: 各预设 schema 的**专属正文段**（标题须逐字，`section()` 严格匹配）。
+#:
+#: 与 `references/schema-*.md` 的「schema 专属正文段」小节保持一致。
+#: 插在「核心骨架」与「矛盾与张力」之间，是各 schema 相对通用骨架的**独有交付物**
+#: （document 的「可执行结论」、person 的「表达DNA」、topic 的「流派对比表」）。
+#:
+#: **不进 `quality_check.py` 的 12 项硬检查**：那 12 项是通用结构契约，
+#: 对所有 schema 一致；专属段由 schema 文档的「硬性要求」约束，并由
+#: `test_distill.py` 的同步测试逐字比对（本常量 ↔ schema 文档）。
+SCHEMA_SECTIONS = {
+    "person": ["身份与时间线", "心智模型", "决策启发式", "表达DNA",
+               "价值观与反模式", "智识谱系"],
+    "topic": ["框架总览", "流派对比表", "概念词典", "案例库", "适用边界"],
+    "document": ["论点树（含层级）", "证据链映射", "术语表", "隐含假设清单",
+                 "可执行结论"],
+}
+
 #: 扩展名 → 素材类型。**类型名 == `sources/` 子目录名**，两者必须一致。
 TYPE_BY_EXT = {
     "books": {".pdf", ".epub", ".mobi", ".azw3", ".djvu"},
@@ -91,6 +108,32 @@ TYPE_BY_EXT = {
 #: `sources/` 下的全部子目录（= 素材类型 + other），按此顺序创建。
 SOURCES_SUBDIRS = list(TYPE_BY_EXT.keys()) + ["other"]
 
+#: 核心骨架条目数上下限。少于下限 = 没提炼，多于上限 = 没取舍。
+#: 放在这里而不是散在检查函数里：它是契约的一部分（artifact-format.md §八、
+#: distillation-framework.md §十都写这个数），测试靠它去核对文档没漂移。
+SKELETON_MIN, SKELETON_MAX = 3, 10
+
+#: 评分卡维度与分值（权威定义在 `references/quality-scorecard.md`）。
+#:
+#: **生成力排在第一位，且分值最高——因为它是判定线。**
+#: 「拿产物去回答一个素材里没直接出现过、但相关的新问题。摘要答不了，蒸馏能答。」
+#: 这条判定线把质量定义在**素材之外**，而覆盖度/信度/浓度/可溯源性/矛盾保留/
+#: 缺口诚实六项测的全是「多忠实地搬了素材」。此前生成力只以「3 道题」的形式
+#: 出现、**不占任何分值**，于是流程里最锋利的那句话在度量上等于不存在：
+#: 一份完美的摘要能拿满分，而摘要不是蒸馏。
+#:
+#: 分值从覆盖度/信度/浓度各挪 5 分、可溯源性挪 5 分给生成力，总分仍为 100。
+SCORECARD_DIMENSIONS = (
+    ("生成力", 20),
+    ("覆盖度", 15),
+    ("信度", 15),
+    ("浓度", 15),
+    ("可溯源性", 10),
+    ("矛盾保留", 15),
+    ("缺口诚实", 10),
+)
+SCORECARD_TOTAL = sum(v for _, v in SCORECARD_DIMENSIONS)
+
 #: 已知二进制：不做文本解码，`words` 记 null 由 agent 抽文本后回填。
 BINARY_EXTS = {
     ".pdf", ".epub", ".mobi", ".azw3", ".djvu", ".docx", ".doc",
@@ -100,16 +143,56 @@ BINARY_EXTS = {
 #: 矛盾分类（见 distillation-framework.md §五）。
 TENSION_TYPES = ("时间性", "领域性", "本质张力", "本质性张力")
 
-#: 和稀泥式调和的特征句式。**矛盾必须保留并分类，禁止调和**（铁律 2）。
-#: 命中即质检不合格——这是铁律，不是风格建议。
+#: 张力类型必须**成标签**才算数：`时间性张力` / `时间性矛盾` / `本质性张力`。
+#:
+#: 只做 `"时间性" in sec` 的子串匹配时，一句「本节尚无内容，但按要求写出『时间性』
+#: 这个词」就能让「矛盾已分类」判 PASS——占位档案白拿一项。要求类型词与
+#: 张力/矛盾/分歧 连用，仍然纯机械，但把「出现这个词」和「做了这个分类」区分开了。
+TENSION_LABEL_RE = re.compile(r"(?:时间性|领域性|本质性?)\s*(?:张力|矛盾|分歧)")
+
+#: 和稀泥 = **信息量净减少**，不是某种句式。
+#:
+#: 判据：把调和后的句子还原，还能不能取出被调和前的两条主张？
+#:   `他在工作中主张放权、在家庭中事无巨细，因为他对「可控性」的权重随场景不同`
+#:     → 两条主张都在，信息量**增加** → 这是**综合**，合法。
+#:   `虽然他在工作中主张放权，但他在家庭中事无巨细，其实两者并不冲突`
+#:     → 「并不冲突」抹掉了差异，读者再也取不出那条张力 → **和稀泥**，非法。
+#:
+#: 所以本正则只收**否认对立**的断言（抹平的实质），**不收裸的「虽然…但是」**：
+#: 转折句式是描述张力的合法形式，用它写一条已分类的时间性/领域性张力
+#: 恰恰是正确写法。把句式当罪证，等于惩罚正确输出，并诱导作者删掉真实矛盾
+#: ——那正是铁律 2 要防的事。转折句式改由 `TURN_RE` 做**软诊断**（见下）。
 HARMONY_RE = re.compile(
-    r"虽然[^。；！？\n]{0,30}但是"
-    r"|其实(?:两者|二者)?(?:是)?(?:互补|一致|统一|相通的)"
+    r"其实(?:两者|二者)?(?:是)?(?:互补|一致|统一|相通)的?"
     r"|(?:两者|二者|二者之间|其实)并?不矛盾"
-    r"|本质上是统一的"
+    r"|本质(?:上)?(?:是)?统一(?:的)?"
     r"|并不冲突"
     r"|殊途同归"
+    r"|说到底是(?:同一|一)回事"
 )
+
+#: 转折句式。**它本身不是和稀泥**，只是抹平的高发句式。
+#: 仅当矛盾段**没有任何张力类型标注**时，才作为软诊断提示复核：
+#: 缺了类型标注的转折，多半是把矛盾揉成了温吞共识。有类型标注则完全合法。
+TURN_RE = re.compile(r"虽然[^。；！？\n]{0,40}但是")
+
+#: 显式声明「查过了，确实没有矛盾」。与 HARMONY_RE 是**相反**的两件事：
+#:   HARMONY_RE 惩罚「有矛盾却抹平」；NO_TENSION_RE 承认「没有就是没有」。
+#: 没有它，一份内部自洽的材料会被硬性要求编造一条矛盾出来——直接违反铁律 1。
+#:
+#: 收「未发现矛盾 / 未发现前后不一致」这类**主动声明核查过**的句式（含「任何」等
+#: 插入语），不收裸的「无矛盾」：后者在正文里常是「两者无矛盾」这类被抹平的结论，
+#: 正是 HARMONY_RE 要拦的东西。宁可漏认（退化成要求写类型词），不可误认。
+NO_TENSION_RE = re.compile(
+    r"未(?:发现|检出|见到|观察到)(?:任何)?(?:矛盾|前后不一致|自相矛盾|不一致之处)"
+    r"|无内部矛盾"
+    r"|不存在矛盾"
+    r"|矛盾状态\s*[:：]\s*无"
+)
+
+#: 「未发现矛盾」声明的最小长度。一行「无矛盾。」就交差，大概率是漏读而非真的没有。
+#: 低于此长度只提示不拦截（见 quality_check 的软诊断）——避免把诚实标注变成新的形式主义。
+NO_TENSION_MIN_CHARS = 20
 
 #: 显式空值记号。用于区分「未回填」（null）与「判定为零」（0）——
 #: 这是本 skill 诚实哲学在数据层的体现（不知道就说不知道）。
@@ -119,10 +202,38 @@ NULL_TOKENS = ("null", "none", "nil", "~", "")
 # 正则
 # --------------------------------------------------------------------------
 
-CONF_MARKER_RE = re.compile(r"[（(【\[]\s*([ABCD])\s*[）)】\]]")
 CONF_LABEL_RE = re.compile(r"信度\s*[:：]\s*([ABCD])")
 CJK_RE = re.compile(r"[一-鿿぀-ヿ가-힯]")
 LATIN_RE = re.compile(r"[A-Za-z0-9]+")
+
+#: 任意层级的 Markdown 标题：`## 核心骨架`。用于给 `section()` 的 miss 定位真因。
+HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.M)
+
+#: Markdown 表格行与分隔行。schema-*.md 的专属段大量用「带信度列的表格」。
+TABLE_ROW_RE = re.compile(r"^\s*\|(.+)\|\s*$")
+TABLE_SEP_RE = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
+
+#: 表格「信度」列里的合法单元格。比裸字母多认一个「级」字（`A 级`），
+#: 其余带中文的单元格一律不认——列名已给了语义，不必再猜。
+TABLE_CONF_CELL_RE = re.compile(r"^([ABCD])\s*(?:级)?\s*$")
+
+#: 核心骨架的顶层条目符号。`+` 与 `1)` / `1、` 都是合法 Markdown 列表，
+#: 不认会让合法档案的骨架数量凭空少一条（进而撞上下限 FAIL）。
+#:
+#: 顿号分支用 `\s*` 而非 `\s+`：中文序号列表最常见的形式是「1、内容」**不带空格**。
+#: `.` 和 `)` 分支仍要求空格——否则 `1.5 倍` 会被当成「第 1 条：5 倍」。
+SKELETON_ITEM_RE = re.compile(r"^(?:[-*+]\s+|\d+[.)]\s+|\d+、\s*)(.+?)\s*$")
+
+#: 引号包裹的片段。里面的字是**被引用的**，不是作者的主张——
+#: 判定和稀泥时必须先剥掉，否则「本节刻意未使用『其实两者并不冲突』这类表述」
+#: 会被当成和稀泥本身（惩罚正确输出）。
+QUOTED_SPAN_RE = re.compile(
+    r"「[^」]*」|『[^』]*』|“[^”]*”|\"[^\"]*\"|‘[^’]*’|《[^》]*》")
+
+#: 「提及而非主张」的前置否定词。命中片段前 16 字内出现这些词，
+#: 说明作者在**讨论**这种写法（禁止/避免/不使用），而不是在用它。
+MENTION_GUARD_RE = re.compile(
+    r"禁止|不许|不要|不得|避免|未使用|不使用|没有使用|刻意未|不采用|拒用|警惕")
 
 # --------------------------------------------------------------------------
 # frontmatter 子集解析（契约 §2.1）
@@ -162,10 +273,10 @@ def parse_scalar(val):
         inner = val[1:-1].strip()
         if not inner:
             return []
-        return [parse_scalar(x) for x in inner.split(",")]
+        return [parse_scalar(x) for x in re.split(r"[,，]", inner)]
     if val.startswith("{") and val.endswith("}"):
         out = {}
-        for part in val[1:-1].split(","):
+        for part in re.split(r"[,，]", val[1:-1]):
             if ":" in part:
                 k, _, v = part.partition(":")
                 out[strip_quotes(k)] = parse_scalar(v)
@@ -234,6 +345,11 @@ def section(body, *titles):
 
     传入多个标题时返回第一个命中的（用于兼容段名变体，如
     「心智模型 / 核心框架」与「核心框架」）。未命中返回 `None`。
+
+    匹配是**严格的**：标题须逐字、独占一行、且为二级。`## 核心骨架（3-10 条）`
+    或 `### 核心骨架` 都不算命中——契约就是这么定的。但 miss 时**必须能说清原因**，
+    否则调用方只会得到「没提炼」这类指向错误根因的失败信息，agent 会去改内容，
+    而真正的问题在标题格式。诊断见 `near_miss_headings`。
     """
     for t in titles:
         m = re.search(r"^##\s+" + re.escape(t) + r"\s*$(.*?)(?=^##\s|\Z)",
@@ -241,6 +357,28 @@ def section(body, *titles):
         if m:
             return m.group(1)
     return None
+
+
+def near_miss_headings(body, title):
+    """找出「看着像目标段、其实不匹配」的实际标题，返回可读的诊断行列表。
+
+    `section()` 只认逐字独占一行的 `## <title>`。写成带后缀的
+    `## 核心骨架（3-10 条）`、或层级写错的 `### 核心骨架`，都会静默 miss。
+    这里把这类标题找出来，让失败信息指向真正的根因（标题格式），
+    而不是误导 agent 去改正文内容。
+    """
+    out = []
+    for m in HEADING_RE.finditer(body or ""):
+        level, text = len(m.group(1)), m.group(2).strip()
+        if level == 2 and text == title:
+            continue                              # 这就是正主，不是 near miss
+        if text == title:
+            out.append("%s %s（层级写错了：须为 `## %s`）"
+                       % ("#" * level, text, title))
+        elif title in text:
+            out.append("%s %s（标题须逐字为 `## %s`，不能带后缀）"
+                       % ("#" * level, text, title))
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -255,16 +393,74 @@ def count_words(text):
     return len(CJK_RE.findall(text)) + len(LATIN_RE.findall(text))
 
 
+def table_conf_by_line(text):
+    """找出「带信度列的 Markdown 表格」里的信度字母，返回 `{行号: 字母}`。
+
+    `schema-person.md` / `schema-topic.md` / `schema-document.md` 的专属段
+    大量规定用带「信度」列的表格（`| 场景 | 启发式 | 反例 | 信度 |`）。
+    若只认行尾括号，照契约写的档案会被**系统性少计**；一份主要靠表格承载主张的
+    档案甚至会误判「正文未检出任何信度标记」而硬性 FAIL——检查在惩罚正确输出。
+
+    认的是**表头里明确写了「信度」那一列**的数据行：列名给了语义，比「行尾裸字母」
+    安全得多（不会把正文里的 `附录（A）` 误吃进分母）。无表头或列名不符的表格不认。
+    """
+    lines = (text or "").splitlines()
+    out = {}
+    col = None
+    for i, line in enumerate(lines):
+        cells = _split_table_cells(line)
+        if cells is None:
+            col = None                            # 表格结束，列定义失效
+            continue
+        if col is not None and not TABLE_SEP_RE.match(line):
+            if col < len(cells):
+                m = TABLE_CONF_CELL_RE.match(cells[col])
+                if m:
+                    out[i] = m.group(1)
+            continue
+        # 当前行是表头？判据：下一行是分隔行，且本行有名为「信度」的列
+        if (i + 1 < len(lines) and TABLE_SEP_RE.match(lines[i + 1])
+                and "信度" in cells):
+            col = cells.index("信度")
+    return out
+
+
+def _split_table_cells(line):
+    """拆一行 Markdown 表格为单元格列表；不是表格行则返回 None。"""
+    m = TABLE_ROW_RE.match(line)
+    if not m:
+        return None
+    return [c.strip() for c in m.group(1).split("|")]
+
+
 def count_confidence(text):
     """统计正文里的信度标记，返回 `{"A":n,"B":n,"C":n,"D":n}`。
 
-    两种写法都认：`（A）` / `[A]` 与 `信度: A`。
+    认三种写法：
+    - **行尾**元数据：`…（A）` / `…（A · sources/x.md）` / `…（B | §段名）`
+    - 显式标签：`信度: A`
+    - **带「信度」列的表格**：表头声明列名，数据行写裸字母（见 `table_conf_by_line`）
+
+    行中间的 `（A）` **不算**。契约 §2.3 明确把「行中间出现（A）」定义为非元数据；
+    而且中文正文里 `附录（A）`、`图（B）` 这类写法很常见，宽松匹配会把它们
+    误当成信度，从而虚增分母、稀释 D 级占比。
+
+    同一行同时出现多种写法时**只计一次**：它们描述的是同一个标记，都数会让分母
+    虚高，并把 D 级占比往重复字母的方向拉偏（重复的是 A 就低估 D 级占比，
+    重复的是 D 就高估）。优先级：行尾元数据 > 表格信度列 > `信度: X` 标签。
     """
     counts = {"A": 0, "B": 0, "C": 0, "D": 0}
-    for m in CONF_MARKER_RE.finditer(text or ""):
-        counts[m.group(1)] += 1
-    for m in CONF_LABEL_RE.finditer(text or ""):
-        counts[m.group(1)] += 1
+    table = table_conf_by_line(text)
+    for i, line in enumerate((text or "").splitlines()):
+        _, conf = split_trailing_meta(line)
+        if conf:
+            counts[conf] += 1
+            continue
+        if i in table:
+            counts[table[i]] += 1
+            continue
+        for m in CONF_LABEL_RE.finditer(line):
+            counts[m.group(1)] += 1
     return counts
 
 
@@ -289,7 +485,10 @@ def format_conf(counts):
 
 
 #: 行尾元数据括号：`（A）` / `（A · sources/x.md）` / `[B | §决策启发式]`
-TRAILING_META_RE = re.compile(r"[（(【\[]([^（）()【】\[\]]*)[）)】\]]\s*$")
+#: 允许括号后再跟一个句末标点（`主张……（A · sources/x.md）。`）——LLM 写档案时
+#: 很自然会这么收尾，若不容忍就会把整行判成「无信度标记」而硬性 FAIL。
+TRAILING_META_RE = re.compile(
+    r"[（(【\[]([^（）()【】\[\]]*)[）)】\]]([。．.；;，,]*)\s*$")
 
 #: 独立的信度字母（前后不能再接字母，避免把 `AB` 里的 A 当信度）
 STANDALONE_CONF_RE = re.compile(r"(?<![A-Za-z])([ABCD])(?![A-Za-z])")
@@ -330,19 +529,94 @@ def skeleton_items(body):
     返回 `[(去元数据文本, 信度字母或 None, 是否有出处指针), ...]`。
     信度只认**行尾**元数据（`…（A）` 或 `…（A · sources/x.md）`）；
     出处指针判定见 `has_source_pointer`。
+
+    只取**顶层**条目：缩进的子条目是对上一条的展开，不是并列的骨架条目，
+    算进来会让骨架数量虚高（进而撞上 >10 的上限）。
+
+    条目符号认 `-` `*` `+` 与 `1.` `1)` `1、`——不认后几种会让合法档案的骨架
+    数量凭空少一条，进而撞上下限 FAIL。缩进（行首空白）不算条目。
     """
     sec = section(body, "核心骨架")
     if sec is None:
         return []
     out = []
     for line in sec.splitlines():
-        m = re.match(r"^\s*(?:[-*]|\d+\.)\s+(.+?)\s*$", line)
+        m = SKELETON_ITEM_RE.match(line)
         if not m:
             continue
         raw = m.group(1)
         clean, conf = split_trailing_meta(raw)
         out.append((clean, conf, has_source_pointer(raw)))
     return out
+
+
+def harmony_matches(text):
+    """返回正文里**否认对立**式调和的命中片段列表（已排除引用与提及）。
+
+    `HARMONY_RE` 本身是纯字符串匹配，分不清「主张」与「提及」。一份**明确否定
+    抹平写法**的档案——「本节刻意未使用『其实两者并不冲突』这类抹平表述」——
+    会被原样判成和稀泥并硬性 FAIL。这与曾经把「虽然…但是」当罪证是同一类错误：
+    判据落在了字符串上，而不是落在「这句话是不是在抹平」上。
+
+    所以这里做两层剥离：
+
+    1. **剥引号**：`「」『』“”""《》` 里的字是被引用的，不是作者的主张。
+    2. **剥提及**：命中片段前 16 字内出现 `MENTION_GUARD_RE` 的否定词
+       （禁止 / 避免 / 未使用 / 警惕…），说明作者在**讨论**这种写法，不是在使用。
+
+    宁可漏认（多拦一个没拦住的调和），不可误认（把否定抹平的句子判成抹平）——
+    误认会训练作者删掉真实矛盾，那正是铁律 2 要防的事。
+    """
+    if not text:
+        return []
+    scrubbed = QUOTED_SPAN_RE.sub("", text)
+    out = []
+    for m in HARMONY_RE.finditer(scrubbed):
+        left = scrubbed[max(0, m.start() - 16):m.start()]
+        if MENTION_GUARD_RE.search(left):
+            continue
+        out.append(m.group(0))
+    return out
+
+
+def has_harmony(text):
+    """正文里是否存在否认对立式调和（判据见 `harmony_matches`）。"""
+    return bool(harmony_matches(text))
+
+
+def labeled_tension_types(text):
+    """返回正文里**成标签**出现的张力类型（去重，保持出现顺序）。
+
+    「出现『时间性』三个字」不等于「做了时间性张力的分类」。判据见
+    `TENSION_LABEL_RE`：类型词要与 张力/矛盾/分歧 连用。
+    """
+    out = []
+    for m in TENSION_LABEL_RE.finditer(text or ""):
+        label = re.sub(r"\s+", "", m.group(0))
+        if label not in out:
+            out.append(label)
+    return out
+
+
+def declaration_sentence(text):
+    """返回「未发现矛盾」声明**所在的整句**；没有声明则返回空串。
+
+    长度门槛必须量在**声明句**上，而不是整段上。量整段的话，
+    「未发现矛盾。」后面接 30 个「哈」就能过——契约要的是「显式声明
+    **并说明核查范围**」，即那句话本身得说清楚比对了什么。
+
+    取句范围以 `。！？\n` 为界，所以「已比对全文各章节的立场陈述，
+    未发现前后不一致。」整句都算进来（核查范围在声明之前，也该计入）。
+    """
+    m = NO_TENSION_RE.search(text or "")
+    if not m:
+        return ""
+    bounds = "。！？\n"
+    start = max([text.rfind(c, 0, m.start()) for c in bounds] + [-1]) + 1
+    ends = [text.find(c, m.end()) for c in bounds]
+    ends = [e for e in ends if e != -1]
+    end = min(ends) + 1 if ends else len(text)
+    return text[start:end].strip()
 
 
 #: 出处指针：素材相对路径 / 文件名带扩展名 / URL / `§` 段锚点 / `[S003]` 素材号。
@@ -429,15 +703,22 @@ def render_table(header, groups, widths):
 
 
 def sha256_file(path):
-    """文件内容的 sha256（十六进制）。
+    """文件内容的 sha256（十六进制）；文件读不到时返回 `None`。
 
     **算法是契约的一部分**：`distillate_sha256` 用它，下游消费者也用它做漂移检测。
-    改动本函数 = 让所有基于旧哈希的下游产物误报漂移。测试用黄金值钉死了它。
+    改动哈希算法 = 让所有基于旧哈希的下游产物误报漂移。测试用黄金值钉死了它。
+
+    读不到（权限、缺失、是目录）返回 `None` 而不是抛异常：调用方全是诊断工具，
+    崩掉比报错更糟。调用方**必须**区分 `None`（读不到）与哈希串（读到了）——
+    把 `None` 当成空串比较会让「读不到」伪装成「一致」，那是静默的错误通过。
     """
     h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 16), b""):
-            h.update(chunk)
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 16), b""):
+                h.update(chunk)
+    except OSError:
+        return None
     return h.hexdigest()
 
 
@@ -447,11 +728,17 @@ def sha256_text(text):
 
 
 def read_text(path):
-    """读文本文件，失败返回空串（只读工具不应因缺文件而崩）。"""
+    """读文本文件，失败返回空串（只读工具不应因缺文件或编码异常而崩）。
+
+    `UnicodeDecodeError` 必须一起接住：档案可能被 Windows 编辑器存成 GBK，
+    或者 `--from-file` 喂进来的是一份非 UTF-8 的旧稿。只接 `OSError` 的话，
+    整个 quality_check / seal / meta_scan 会带着 traceback 退出，
+    而这几个脚本的定位是「诊断工具」——诊断工具崩掉比报错更糟。
+    """
     try:
         with open(path, "r", encoding="utf-8") as f:
             return f.read()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return ""
 
 
@@ -462,6 +749,49 @@ def load_json(path, default=None):
             return json.load(f)
     except (OSError, ValueError):
         return default
+
+
+def load_manifest(root_or_path):
+    """读档案的 `manifest.json`，返回 dict；缺失、坏 JSON 或结构不是对象时返回 None。
+
+    `manifest.json` 是可以被人手改的，也可能被别的工具写坏。JSON 合法但顶层
+    不是对象（`[]` / `"x"` / `123`）时，裸的 `.get()` 会让 seal / quality_check /
+    meta_scan / distill_report 全部带 traceback 退出——诊断工具崩掉比报错更糟，
+    因为它连「哪份档案有问题」都说不出来。这里统一收敛成 None，
+    由调用方给一句人话错误。
+    """
+    path = (root_or_path if os.path.basename(str(root_or_path)) == "manifest.json"
+            else os.path.join(str(root_or_path), "manifest.json"))
+    data = load_json(path)
+    return data if isinstance(data, dict) else None
+
+
+def manifest_dimensions(manifest):
+    """返回 `manifest["dimensions"]` 里的 dict 项列表（非 dict 项被丢弃）。
+
+    `manifest.json` 可以被手改，也可能被别的工具写坏。顶层不是对象已由
+    `load_manifest` 收敛，但**嵌套结构**畸形（`"dimensions": ["著作"]`、
+    `"sources": ["a"]`）会让裸的 `.get()` 在 quality_check / distill_report /
+    meta_scan / ingest 里**同时** traceback——而 quality_check 崩在第 5 项，
+    比第 12 项的 manifest 检查更早，连「manifest 缺字段」这句人话都说不出来。
+
+    所以所有读嵌套结构的地方都必须走这里，不要在脚本里裸迭代。
+    """
+    dims = (manifest or {}).get("dimensions")
+    if not isinstance(dims, list):
+        return []
+    return [d for d in dims if isinstance(d, dict)]
+
+
+def manifest_sources(manifest):
+    """返回 `manifest["sources"]` 里的 dict 项列表（非 dict 项被丢弃）。
+
+    与 `manifest_dimensions` 同因：畸形嵌套不该让诊断工具崩掉。
+    """
+    srcs = (manifest or {}).get("sources")
+    if not isinstance(srcs, list):
+        return []
+    return [s for s in srcs if isinstance(s, dict)]
 
 
 def write_json(path, obj):

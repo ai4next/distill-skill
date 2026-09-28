@@ -40,6 +40,22 @@ import _lib  # noqa: E402
 USAGE = "python3 seal.py <档案目录或 DISTILLATE.md> [--check]"
 
 
+def derive_ratio(manifest):
+    """从 `source_words` / `distillate_words` 派生 `compression_ratio` 字符串。
+
+    两个数缺一不可、必须是整数、且档案字数 >0，否则返回 None（**不猜**）。
+    契约要求 `compression_ratio` 必填，而它是纯派生值——让 agent 手算
+    `"38:1"` 只是白送一个出错面，还会在软诊断里报出「自报值与实测值偏差」。
+    素材是二进制、字数尚未回填时返回 None，由 agent 抽文本后回填再封存。
+    """
+    src = manifest.get("source_words")
+    dst = manifest.get("distillate_words")
+    for v in (src, dst):
+        if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
+            return None
+    return "%d:1" % max(1, round(src / float(dst)))
+
+
 def main():
     argv = sys.argv[1:]
     if not argv or argv[0] in ("-h", "--help"):
@@ -65,9 +81,12 @@ def main():
             "未找到 manifest.json（档案目录应由 ingest.py 建立）: " + mpath, USAGE)
 
     digest = _lib.sha256_file(dpath)
-    manifest = _lib.load_json(mpath)
+    if digest is None:
+        _lib.usage_error("无法读取 DISTILLATE.md（权限或路径问题）: " + dpath, USAGE)
+    manifest = _lib.load_manifest(mpath)
     if manifest is None:
-        _lib.usage_error("manifest.json 解析失败: " + mpath, USAGE)
+        _lib.usage_error(
+            "manifest.json 缺失、解析失败或顶层不是对象: " + mpath, USAGE)
 
     recorded = manifest.get("distillate_sha256")
     short = digest[:12]
@@ -91,6 +110,14 @@ def main():
         sys.exit(0)
 
     manifest["distillate_sha256"] = digest
+
+    # 顺带派生 compression_ratio：它是 source_words / distillate_words 的商，
+    # 让 agent 手算成 "38:1" 只是白送一个出错面。只在两个数都是整数时派生，
+    # 且**不覆盖**已有的合法值之外的东西——测不到就留 null，不猜。
+    derived = derive_ratio(manifest)
+    if derived:
+        manifest["compression_ratio"] = derived
+
     _lib.write_json(mpath, manifest)
 
     # version 不一致是常见的人为疏漏（改了档案忘了递增），如实提示但不代改
@@ -104,6 +131,9 @@ def main():
 
     print("🔒 已封存: %s…" % short)
     print("   写入 %s" % os.path.relpath(mpath))
+    if derived:
+        print("   派生 compression_ratio=%s（源 %s 字 : 档 %s 字）"
+              % (derived, manifest["source_words"], manifest["distillate_words"]))
     print("   下游消费者据此判断产物是否基于当前档案；档案改动后须重新 seal。")
 
 

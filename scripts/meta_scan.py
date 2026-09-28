@@ -45,9 +45,13 @@ def load_archive(path):
         return None
 
     claims = [{"text": t, "conf": c or "?"} for t, c, _ in _lib.skeleton_items(body)]
+    # 各 schema 把「心智模型 / 核心框架」这段具体化成了不同标题：person 用
+    # 「心智模型」，topic 用「框架总览」，document 用「论点树」。只认通用名会让
+    # 「找跨档案复现的框架」这个功能对所有真实档案都返回空。
     models = re.findall(
         r"^###\s+(.+)$",
-        _lib.section(body, "心智模型 / 核心框架", "核心框架") or "", re.M)
+        _lib.section(body, "心智模型 / 核心框架", "心智模型", "核心框架",
+                     "框架总览", "论点树") or "", re.M)
 
     # 信度统计：优先用 frontmatter，缺失则从正文数
     conf = fm.get("confidence")
@@ -55,11 +59,16 @@ def load_archive(path):
         conf = _lib.count_confidence(body)
 
     dims, sources, overlap_keys = {}, [], set()
-    manifest = _lib.load_json(os.path.join(d, "manifest.json"))
-    if manifest:
-        for dim in manifest.get("dimensions", []) or []:
+    manifest = _lib.load_manifest(d)
+    if manifest is None:
+        # 没有 manifest 就没有 sha256 键，重叠检测会静默失效——必须说出来，
+        # 否则「两份档案不构成独立佐证」这个本工具的核心结论会变成假阴性。
+        manifest_missing = True
+    else:
+        manifest_missing = False
+        for dim in _lib.manifest_dimensions(manifest):
             dims[dim.get("name")] = dim.get("coverage")
-        for s in manifest.get("sources", []) or []:
+        for s in _lib.manifest_sources(manifest):
             sources.append(s)
             # 重叠判定的键：优先内容哈希，其次路径
             key = s.get("sha256") or s.get("path")
@@ -78,6 +87,7 @@ def load_archive(path):
         "gaps": fm.get("gaps") or [],
         "dimensions": dims,
         "n_sources": len(sources),
+        "manifest_missing": manifest_missing,
         "overlap_keys": overlap_keys,
         "source_paths": {s.get("sha256") or s.get("path"): s.get("path")
                          for s in sources if (s.get("sha256") or s.get("path"))},
@@ -210,6 +220,12 @@ def main():
 
     # 重叠警告（最重要）
     print("")
+    no_manifest = [a["slug"] for a in archives if a.get("manifest_missing")]
+    if no_manifest:
+        print("⚠️  以下档案缺少可解析的 manifest.json：%s" % "、".join(no_manifest))
+        print("   没有 manifest 就没有 sources[].sha256，重叠检测的判重键退化为")
+        print("   相对路径——「未发现共享素材」这个结论**不可信**。")
+        print("")
     if overlaps:
         print("⚠️  来源重叠检测 —— 以下档案共享素材，**不构成独立佐证**：")
         for o in overlaps:
@@ -271,6 +287,11 @@ def main():
     print("    2. 判定哪些是**真对立**（各自信度 ≥B）")
     print("    3. 区分**事实分歧**与**价值观分歧**（后者才是断层线）")
     print("    4. 按 meta-synthesis.md 合成 topic schema 档案 + 「## 综合」段")
+
+    # slug 碰撞会让综合结果无法区分出处，是**不可继续**的硬错误。
+    # 退出码必须非 0，否则 CI 里 `meta_scan.py ... && 继续综合` 会照常放行。
+    if collisions:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

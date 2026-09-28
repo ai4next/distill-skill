@@ -30,9 +30,15 @@ CONTRADICTION_RE = re.compile(r"矛盾|相反|但实际上|争议|张力|不一�
 
 
 def count_sources(text):
-    """统计底稿中引用的来源数（URL + 素材文件路径，去重）。"""
+    """统计底稿中引用的来源数（URL + 素材文件路径，去重）。
+
+    **先把 URL 从文本里挖掉再找路径**。两个正则分别 findall 再相加的话，
+    `见 https://example.com/a.pdf` 会被算成 2 个来源（URL 一次，
+    URL 尾巴上的 `a.pdf` 又一次）——检查点表里的「N 源」对含链接的底稿
+    会系统性虚高。
+    """
     urls = set(URL_RE.findall(text))
-    paths = set(PATH_RE.findall(text))
+    paths = set(PATH_RE.findall(URL_RE.sub(" ", text)))
     return len(urls) + len(paths)
 
 
@@ -72,11 +78,11 @@ def main():
     mpath = os.path.join(root, "manifest.json")
     if not os.path.isfile(mpath):
         _lib.usage_error("未找到 manifest.json，这不是一个蒸馏档案目录: " + root, USAGE)
-    manifest = _lib.load_json(mpath)
+    manifest = _lib.load_manifest(mpath)
     if manifest is None:
-        _lib.usage_error("manifest.json 解析失败: " + mpath, USAGE)
+        _lib.usage_error("manifest.json 解析失败或顶层不是对象: " + mpath, USAGE)
 
-    dims = manifest.get("dimensions", []) or []
+    dims = _lib.manifest_dimensions(manifest)
     research_dir = os.path.join(root, "research")
 
     W = (12, 8, 8, 16, 40)
@@ -112,7 +118,7 @@ def main():
                 if s and len(s) > 6:
                     contradictions.append(s[:70])
 
-    src_total = len(manifest.get("sources", []) or [])
+    src_total = len(_lib.manifest_sources(manifest))
     primary = manifest.get("sources_primary")
     if _lib.is_null(primary):
         pct = " (一手占比 未回填)"
